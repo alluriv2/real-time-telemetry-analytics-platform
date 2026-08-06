@@ -45,17 +45,17 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_HEAP_OPTS: -Xms256m -Xmx320m
+      KAFKA_HEAP_OPTS: -Xms192m -Xmx256m
       KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
       - ./local-data/kafka:/var/lib/kafka/data
     healthcheck:
-      test: [CMD-SHELL, '/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1']
+      test: [CMD-SHELL, 'KAFKA_HEAP_OPTS="-Xms32m -Xmx64m" /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1']
       interval: 10s
       timeout: 10s
       retries: 30
       start_period: 30s
-    mem_limit: 448m
+    mem_limit: 640m
     restart: unless-stopped
     networks: [weather]
 

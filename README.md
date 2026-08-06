@@ -82,6 +82,24 @@ storage. `./stop` retains everything under `local-data/`. The next `./start`
 compares PostgreSQL timestamps with the upstream source and republishes only
 the required reconciliation window through Kafka.
 
+### Check Kafka consumer lag
+
+Run the diagnostic CLI with a small heap so it can coexist with the broker on
+a 2 GB server:
+
+```bash
+docker compose exec \
+  -e KAFKA_HEAP_OPTS="-Xms32m -Xmx64m" \
+  kafka \
+  /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 \
+  --describe \
+  --group weather-postgres-consumer-aws
+```
+
+`LAG` is the number of messages waiting for the consumer group. A value of
+zero means PostgreSQL ingestion has caught up with the Kafka topic.
+
 ## Persistence
 
 ```text
