@@ -40,6 +40,10 @@ jobs:
         run: |
           python -m compileall .
 
+      - name: Create CI Environment File
+        run: |
+          cp .env.example .env
+
       - name: Validate Docker Compose
         run: |
           docker compose config --quiet
