@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+echo "==> Service status"
+docker compose --profile bootstrap --profile monitoring --profile tools ps -a
+
+container_ids="$(docker compose --profile bootstrap --profile monitoring \
+    --profile tools ps -q)"
+if [[ -n "$container_ids" ]]; then
+    echo
+    echo "==> Current resource usage"
+    # shellcheck disable=SC2086
+    docker stats --no-stream $container_ids
+fi
+
+echo
+echo "==> Persistent storage"
+if [[ -d local-data ]]; then
+    du -sh local-data/* 2>/dev/null || true
+else
+    echo "No local-data directory has been created yet."
+fi

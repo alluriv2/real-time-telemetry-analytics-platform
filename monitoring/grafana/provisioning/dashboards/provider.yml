@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: Weather Analytics
+    orgId: 1
+    folder: Weather Analytics
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

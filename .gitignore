@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+spark/
+
+# Environment variables and secrets
+.env
+.env.dev
+
+# Editors and operating systems
+.vscode/
+.DS_Store
+
+# Logs and runtime data
+*.log
+producer_state.json
+local-data/
+kafka-storage/
+
+# Tool caches
+.pytest_cache/
+.ipynb_checkpoints/
+.gitnexus/
+AGENTS.md
+CLAUDE.md
+.claude/

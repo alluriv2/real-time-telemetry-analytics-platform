@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+ENABLE_MONITORING=false
+ENABLE_TOOLS=false
+
+for argument in "$@"; do
+    case "$argument" in
+        --monitoring) ENABLE_MONITORING=true ;;
+        --tools) ENABLE_TOOLS=true ;;
+        --all)
+            ENABLE_MONITORING=true
+            ENABLE_TOOLS=true
+            ;;
+        *)
+            echo "Unknown argument: $argument"
+            echo "Usage: ./start [--monitoring] [--tools] [--all]"
+            exit 2
+            ;;
+    esac
+done
+
+command -v docker >/dev/null 2>&1 || {
+    echo "Docker is required but was not found."
+    exit 1
+}
+docker compose version >/dev/null 2>&1 || {
+    echo "Docker Compose v2 is required."
+    exit 1
+}
+[[ -f .env ]] || {
+    echo "Missing .env. Create it with: cp .env.example .env"
+    exit 1
+}
+if grep -q "replace-with-" .env; then
+    echo "Replace the placeholder passwords in .env before starting."
+    exit 1
+fi
+
+mkdir -p local-data/{postgres,kafka,prometheus,grafana}
+# These containers run as non-root image users. The server is single-tenant,
+# and these runtime directories remain excluded from Git.
+chmod 0777 local-data/kafka local-data/prometheus local-data/grafana
+
+echo "==> Building the application image from the current source"
+docker compose build api
+
+echo "==> Starting PostgreSQL and Kafka"
+docker compose up -d --wait postgres kafka
+
+echo "==> Starting the consumer before publishing backfill events"
+docker compose up -d consumer
+
+echo "==> Reconciling source history through Kafka"
+docker compose --profile bootstrap run --rm backfill
+
+echo "==> Starting the application services"
+docker compose up -d --wait producer consumer aggregator api dashboard
+
+if [[ "$ENABLE_MONITORING" == true ]]; then
+    echo "==> Starting Prometheus and Grafana"
+    docker compose --profile monitoring up -d \
+        postgres-exporter kafka-exporter cadvisor prometheus grafana
+fi
+if [[ "$ENABLE_TOOLS" == true ]]; then
+    echo "==> Starting Kafka UI"
+    docker compose --profile tools up -d kafka-ui
+fi
+
+echo
+echo "Weather dashboard: http://localhost:${DASHBOARD_PUBLIC_PORT:-8050}"
+[[ "$ENABLE_MONITORING" == true ]] && {
+    echo "Prometheus (SSH tunnel): http://localhost:${PROMETHEUS_PORT:-29090}"
+    echo "Grafana (SSH tunnel):    http://localhost:${GRAFANA_PORT:-23000}"
+}
+[[ "$ENABLE_TOOLS" == true ]] && {
+    echo "Kafka UI (SSH tunnel):   http://localhost:${KAFKA_UI_PORT:-18080}"
+}
+echo
+docker compose ps

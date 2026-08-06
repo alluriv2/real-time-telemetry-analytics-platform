@@ -1,0 +1,220 @@
+name: weather-analytics-aws
+
+x-weather-service: &weather-service
+  image: weather-platform-aws:local
+  env_file: [.env]
+  restart: unless-stopped
+  networks: [weather]
+
+x-weather-dependencies: &weather-dependencies
+  postgres:
+    condition: service_healthy
+  kafka:
+    condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17
+    env_file: [.env]
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./local-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    mem_limit: 320m
+    restart: unless-stopped
+    networks: [weather]
+
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx320m
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - ./local-data/kafka:/var/lib/kafka/data
+    healthcheck:
+      test: [CMD-SHELL, '/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1']
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    mem_limit: 448m
+    restart: unless-stopped
+    networks: [weather]
+
+  api:
+    <<: *weather-service
+    build:
+      context: .
+    command: [uvicorn, weather_platform.api:app, --host, 0.0.0.0, --port, "8000"]
+    depends_on: *weather-dependencies
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://localhost:8000/health", timeout=5)']
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    mem_limit: 160m
+
+  dashboard:
+    <<: *weather-service
+    command: [gunicorn, --bind, "0.0.0.0:8050", --workers, "1", --threads, "2", --timeout, "120", weather_platform.dashboard.app:server]
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${DASHBOARD_BIND_ADDRESS:-0.0.0.0}:${DASHBOARD_PUBLIC_PORT:-8050}:8050"
+    mem_limit: 288m
+
+  consumer:
+    <<: *weather-service
+    command: [python, -m, weather_platform.consumer]
+    depends_on: *weather-dependencies
+    mem_limit: 192m
+
+  producer:
+    <<: *weather-service
+    command: [python, -m, weather_platform.producer]
+    depends_on: *weather-dependencies
+    mem_limit: 192m
+
+  aggregator:
+    <<: *weather-service
+    command: [python, -m, weather_platform.aggregation]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      consumer:
+        condition: service_started
+    mem_limit: 224m
+
+  backfill:
+    <<: *weather-service
+    command: [python, -m, weather_platform.backfill]
+    depends_on: *weather-dependencies
+    restart: "no"
+    mem_limit: 320m
+    profiles: [bootstrap]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    environment:
+      KAFKA_CLUSTERS_0_NAME: weather-aws
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${KAFKA_UI_PORT:-18080}:8080"
+    mem_limit: 256m
+    restart: unless-stopped
+    networks: [weather]
+    profiles: [tools]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.18.1
+    environment:
+      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB}?sslmode=disable
+      DATA_SOURCE_USER: ${POSTGRES_USER}
+      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 64m
+    restart: unless-stopped
+    networks: [weather]
+    profiles: [monitoring]
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    command: [--kafka.server=kafka:9092]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    mem_limit: 96m
+    restart: unless-stopped
+    networks: [weather]
+    profiles: [monitoring]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    mem_limit: 128m
+    restart: unless-stopped
+    networks: [weather]
+    profiles: [monitoring]
+
+  prometheus:
+    image: prom/prometheus:v3.5.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./local-data/prometheus:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres-exporter:
+        condition: service_started
+      kafka-exporter:
+        condition: service_started
+      cadvisor:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-29090}:9090"
+    mem_limit: 256m
+    restart: unless-stopped
+    networks: [weather]
+    profiles: [monitoring]
+
+  grafana:
+    image: grafana/grafana:12.4.0
+    env_file: [.env]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./local-data/grafana:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-23000}:3000"
+    mem_limit: 256m
+    restart: unless-stopped
+    networks: [weather]
+    profiles: [monitoring]
+
+networks:
+  weather:
+    driver: bridge
