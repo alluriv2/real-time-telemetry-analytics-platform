@@ -546,6 +546,19 @@ Configure the Lightsail IPv4 and, if enabled, IPv6 firewalls:
 | `80/tcp` | Public | HTTP and certificate validation |
 | `443/tcp` | Public | HTTPS |
 
+In the Lightsail **Networking** tab, port `443` may not exist yet. Add an
+HTTPS rule before running Certbot. In the **Add rule** dialog, do not leave the
+source preset set to **Custom** unless you intend to enter CIDR ranges
+manually; Lightsail otherwise reports that a source IP address or service is
+required. For this public dashboard:
+
+1. Select the **HTTPS** application or enter TCP port `443`.
+2. Select **Anywhere IPv4** as the source preset.
+3. Use **Add** in the dialog to add a second source for **Anywhere IPv6** when
+   IPv6 is enabled.
+4. Save the rule and confirm that both IPv4 and IPv6 match the existing public
+   HTTP rule.
+
 Do not publicly open:
 
 ```text
@@ -571,7 +584,9 @@ http://LIGHTSAIL_STATIC_IP
 ### 8. Connect a portfolio subdomain
 
 Keep the existing portfolio at its current host and point only a subdomain to
-Lightsail. In the DNS provider, create:
+Lightsail. For `alluriv.dev`, DNS is managed through **Vercel → Domains**. Add
+the following record there. For another domain, make the equivalent change at
+the provider that hosts its authoritative DNS:
 
 ```text
 Type:  A
@@ -610,10 +625,49 @@ sudo systemctl reload nginx
 
 The portfolio can now link to `http://weather.example.com`.
 
+#### Authorize Let's Encrypt with CAA
+
+Before requesting the certificate, inspect the domain's CAA records:
+
+```bash
+dig CAA example.com
+dig CAA weather.example.com
+```
+
+CAA records tell certificate authorities whether they are permitted to issue
+certificates for a domain. If the domain already has CAA records that authorize
+only other authorities—such as `pki.goog` or `sectigo.com`—Let's Encrypt cannot
+issue the certificate until it is explicitly authorized.
+
+For this deployment, add the following record in **Vercel → Domains**:
+
+```text
+Type:  CAA
+Name:  weather
+Flags: 0
+Tag:   issue
+Value: letsencrypt.org
+```
+
+The resulting record is:
+
+```text
+weather.alluriv.dev.  CAA  0 issue "letsencrypt.org"
+```
+
+Scoping the record to `weather` authorizes Let's Encrypt for this subdomain
+without replacing the root domain's existing CAA policy. Wait for DNS
+propagation and verify it before continuing:
+
+```bash
+dig CAA weather.alluriv.dev
+```
+
 ### 9. Enable HTTPS
 
-Ensure DNS resolves to the static IP and ports `80` and `443` are open. Then
-install Certbot:
+Ensure the A record resolves to the static IP, the CAA lookup authorizes
+`letsencrypt.org`, and Lightsail ports `80` and `443` are open for the required
+IPv4 and IPv6 sources. Then install Certbot:
 
 ```bash
 sudo apt update
@@ -724,6 +778,38 @@ sudo nginx -T
 
 The DNS result must match the attached Lightsail static IP, and `server_name`
 must match the requested hostname.
+
+### Certbot cannot issue the certificate
+
+Confirm that the subdomain resolves to the Lightsail static IP, ports `80` and
+`443` are publicly reachable, and CAA permits Let's Encrypt:
+
+```bash
+dig +short weather.example.com
+dig CAA weather.example.com
+sudo nginx -t
+```
+
+If any CAA records exist but none authorize `letsencrypt.org`, add a subdomain
+CAA record such as `0 issue "letsencrypt.org"` at the authoritative DNS
+provider and wait for propagation before retrying Certbot.
+
+### The domain works over HTTPS but the raw HTTP IP returns 404
+
+This is expected after Certbot modifies the Nginx site. Its generated port-80
+server block redirects to HTTPS only when the request's `Host` header exactly
+matches the configured `server_name`. A request to an old
+`http://LIGHTSAIL_STATIC_IP` bookmark has a different Host header and falls
+through to Nginx's `return 404`.
+
+Use and share the canonical domain URL:
+
+```text
+https://weather.example.com
+```
+
+The raw IP returning 404 in this situation is a deliberate host-validation
+behavior, not evidence that the dashboard or reverse proxy is down.
 
 ### SSH stops working after attaching a static IP
 
