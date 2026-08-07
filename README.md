@@ -64,6 +64,10 @@ Internet --> Lightsail firewall --> Nginx :80/:443 --> Dash :8050
 ├── start
 ├── stop
 ├── status
+├── .github/
+│   └── workflows/
+│       ├── ci.yml
+│       └── deploy.yml
 ├── src/
 │   └── weather_platform/
 │       ├── backfill.py
@@ -835,3 +839,264 @@ catches up.
 - Apply Ubuntu, Docker, and container-image security updates.
 - Use HTTPS before sharing the dashboard publicly.
 - Store backups and snapshots outside the running application instance.
+
+## Continuous integration and deployment
+
+The repository contains separate GitHub Actions workflows for validation and
+deployment:
+
+- `.github/workflows/ci.yml` runs the **Continuous Integration** workflow.
+- `.github/workflows/deploy.yml` runs the **Continuous Deployment** workflow.
+
+The workflows are configured, but a successful end-to-end production
+deployment should not be assumed until a change has passed CI on `main`, the CD
+run has completed successfully, and the application has been checked on the
+Lightsail instance.
+
+### Development workflow
+
+Create changes on a feature branch rather than committing directly to `main`:
+
+```bash
+git switch main
+git pull --ff-only origin main
+git switch -c feature/descriptive-name
+```
+
+Commit and push the branch, then open a pull request targeting `main`:
+
+```bash
+git add .
+git commit -m "Describe the change"
+git push -u origin feature/descriptive-name
+```
+
+Review the CI result before merging. After the pull request is merged, CI runs
+again for the resulting push to `main`. Only a successful CI run on `main`
+qualifies the CD workflow to deploy.
+
+### Continuous Integration
+
+`ci.yml` runs:
+
+- manually through `workflow_dispatch`;
+- on pushes to `main`;
+- on pushes to branches matching `feature/**`; and
+- on pull requests targeting `main`.
+
+The `Test and Build` job uses a read-only repository token and performs these
+steps on an Ubuntu runner:
+
+1. Checks out the repository.
+2. Installs Python 3.12 and caches pip downloads.
+3. Installs dependencies from `requirements.txt`.
+4. Compiles the Python source with `python -m compileall .` to catch syntax
+   errors.
+5. Copies `.env.example` to `.env` for CI-only configuration.
+6. Validates the resolved Compose configuration with
+   `docker compose config --quiet`.
+7. Builds the Docker Compose application image.
+
+The generated CI `.env` exists only on the temporary GitHub-hosted runner.
+CI uses the committed example values solely to validate configuration and
+buildability; it does not use or replace the server's production `.env`.
+Real credentials must not be added to `.env.example`.
+
+### Continuous Deployment
+
+`deploy.yml` uses GitHub Actions' `workflow_run` event. It is considered only
+when **Continuous Integration** completes for `main`, and its deployment job
+has an additional condition requiring the CI conclusion to be `success`.
+Failed or cancelled CI runs therefore do not execute the SSH deployment step.
+
+The deployment runner creates a temporary SSH configuration from GitHub
+Secrets, connects to Lightsail, and runs:
+
+```bash
+cd ~/weather-analytics-platform-aws
+git fetch origin main
+git switch main
+git pull --ff-only origin main
+./start
+```
+
+`git pull --ff-only` prevents the deployment from hiding divergent or
+uncommitted server-side history behind an automatic merge. `./start` rebuilds
+the application image and starts or updates the Compose services while
+retaining the server-managed `.env` and `local-data/`.
+
+Because `./start` includes reconciliation/backfill work and waits for core
+service health checks, the GitHub Actions SSH step can remain active while
+that work completes.
+
+### Required GitHub Secrets
+
+Configure these under **GitHub repository → Settings → Secrets and variables
+→ Actions**:
+
+| Secret | Content |
+| --- | --- |
+| `LIGHTSAIL_HOST` | Lightsail static IP address or deployment hostname |
+| `LIGHTSAIL_USER` | SSH account used for deployment, commonly `ubuntu` |
+| `LIGHTSAIL_SSH_KEY` | Private key whose public key is authorized on Lightsail |
+| `LIGHTSAIL_KNOWN_HOSTS` | Pinned SSH host-key entry for the Lightsail host |
+
+Do not paste secret values, private keys, or the contents of `.env` into the
+repository, workflow files, issues, pull requests, or logs. Preserve the
+private key's complete multiline format when storing it as a secret.
+
+Create `LIGHTSAIL_KNOWN_HOSTS` from a trusted host-key fingerprint. Do not
+disable host-key checking and do not blindly trust an unverified
+`ssh-keyscan` result; compare the key fingerprint through an independent,
+trusted Lightsail connection or AWS-provided instance information first.
+
+### Two separate SSH trust relationships
+
+Automated deployment depends on two independent key relationships:
+
+1. **GitHub Actions → Lightsail.** The private deployment key is stored as
+   `LIGHTSAIL_SSH_KEY`. Its matching public key must be present in the
+   deployment user's `~/.ssh/authorized_keys` on Lightsail. The
+   `LIGHTSAIL_KNOWN_HOSTS` secret lets the runner authenticate the server
+   before sending commands.
+2. **Lightsail → GitHub.** The Lightsail instance uses its own dedicated
+   read-only GitHub deploy key when `git fetch` and `git pull` access the
+   private repository over SSH. The server's public key is registered under
+   **Repository Settings → Deploy keys**, with write access disabled; its
+   private key remains only on Lightsail.
+
+These keys serve different directions and should not be reused. The GitHub
+Actions key grants login to the server; the GitHub deploy key grants the
+server read access to this repository.
+
+### CI/CD security model
+
+- GitHub workflow permissions are limited to `contents: read`.
+- Deployment occurs only after successful CI for `main`, not directly from a
+  feature-branch run.
+- SSH host verification uses a pinned `known_hosts` entry.
+- The Actions-to-Lightsail private key is stored only as an encrypted GitHub
+  Actions secret and written to the temporary runner with mode `600`.
+- The Lightsail-to-GitHub deploy key is repository-specific and read-only.
+- Production configuration and persistent data remain on Lightsail and are
+  excluded from Git.
+- The deployment account must have the Docker access required by `./start`.
+  Docker group membership is effectively root-level access, so the account and
+  its SSH key must be tightly controlled.
+- Branch protection should require CI and pull-request review before merging
+  to `main`.
+
+### CI/CD troubleshooting
+
+#### CI does not start
+
+Confirm that the branch is `main` or matches `feature/**`, or that the pull
+request targets `main`. Other branch names do not trigger the current push
+rule. The workflow can also be started manually from the Actions tab.
+
+#### Compose validation fails after `.env.example` is copied
+
+Run the same checks locally:
+
+```bash
+cp .env.example .env
+docker compose config --quiet
+docker compose build
+```
+
+Ensure every variable required to parse `compose.yaml` has a safe,
+non-sensitive example value. Do not solve this by committing production
+secrets.
+
+#### CD does not start after CI
+
+Verify that the successful **Continuous Integration** run belongs to `main`.
+Feature-branch and pull-request CI runs validate changes but do not qualify for
+deployment. Also confirm that the workflow name in `deploy.yml` exactly
+matches `name: Continuous Integration` in `ci.yml`.
+
+#### SSH reports `Permission denied (publickey)`
+
+Confirm that `LIGHTSAIL_USER` is correct and that the public key matching
+`LIGHTSAIL_SSH_KEY` is in that user's `~/.ssh/authorized_keys`. Check file
+permissions on the server without printing private key material.
+
+#### SSH reports host-key verification failure
+
+Check that `LIGHTSAIL_KNOWN_HOSTS` contains the host key for the hostname or IP
+stored in `LIGHTSAIL_HOST`. If the instance was replaced or its host key
+legitimately changed, verify the new fingerprint independently before updating
+the secret.
+
+#### Lightsail cannot fetch from GitHub
+
+From Lightsail, test the separate repository deploy key:
+
+```bash
+ssh -T git@github.com
+git -C ~/weather-analytics-platform-aws remote -v
+git -C ~/weather-analytics-platform-aws fetch origin main
+```
+
+Confirm that `origin` uses the intended repository SSH URL and the registered
+deploy key still has read access.
+
+#### `git pull --ff-only` fails
+
+Inspect the Lightsail checkout for local commits or tracked-file changes:
+
+```bash
+cd ~/weather-analytics-platform-aws
+git status
+git log --oneline --decorate -5
+```
+
+Do not discard server changes automatically. Preserve and review them, then
+restore the server checkout to a clean, intentional deployment state.
+
+#### Deployment succeeds but the application is unavailable
+
+Treat the Actions result as confirmation that the remote commands exited
+successfully, not as a complete user-facing health check. On Lightsail, run:
+
+```bash
+cd ~/weather-analytics-platform-aws
+./status
+docker compose logs --tail=100
+curl -I http://127.0.0.1:8050
+sudo nginx -t
+```
+
+Then verify the public HTTPS endpoint separately.
+
+### First end-to-end deployment test
+
+Use a harmless, visible change on a `feature/**` branch, open a pull request,
+and wait for CI to pass. After merging, confirm:
+
+1. CI succeeds for the merge commit on `main`.
+2. **Continuous Deployment** starts from that completed CI run.
+3. The `Deploy to Lightsail` job succeeds.
+4. The Lightsail checkout points to the expected `main` commit.
+5. `./status`, the internal dashboard URL, and the public HTTPS URL are
+   healthy and display the intended change.
+
+Until all five checks have been completed, describe CD as configured or
+pending verification rather than verified.
+
+### Future improvements
+
+- Protect `main` with required pull requests, approvals, and the CI status
+  check.
+- Add unit, integration, lint, and security checks beyond syntax compilation
+  and image building.
+- Pin third-party Actions to immutable commit SHAs and review dependency
+  updates.
+- Add a concurrency group so only one production deployment runs at a time.
+- Add deployment timeouts and an explicit post-deployment health check against
+  the internal or public endpoint.
+- Record the deployed commit and application version for easier auditing.
+- Add automated PostgreSQL backups and an off-instance restore test.
+- Introduce image scanning, dependency update automation, and secret scanning.
+- Add a rollback procedure or immutable image registry deployment once the
+  single-instance workflow grows beyond direct source deployment.
