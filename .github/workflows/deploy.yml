@@ -1,0 +1,59 @@
+name: Continuous Deployment
+
+on:
+  workflow_run:
+    workflows:
+      - Continuous Integration
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to Lightsail
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy application
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+          LIGHTSAIL_SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          LIGHTSAIL_KNOWN_HOSTS: ${{ secrets.LIGHTSAIL_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$LIGHTSAIL_SSH_KEY" > ~/.ssh/lightsail_key
+          chmod 600 ~/.ssh/lightsail_key
+
+          printf '%s\n' "$LIGHTSAIL_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+          ssh \
+            -i ~/.ssh/lightsail_key \
+            -o IdentitiesOnly=yes \
+            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST" <<'EOF'
+
+              set -e
+
+              cd ~/weather-analytics-platform-aws
+
+              echo "Fetching latest main..."
+              git fetch origin main
+
+              echo "Updating server..."
+              git switch main
+              git pull --ff-only origin main
+
+              echo "Starting updated platform..."
+              ./start
+
+              echo "Deployment completed."
+          EOF
+          
