@@ -130,6 +130,16 @@ KAFKA_CONSUMER_GROUP = os.getenv(
     "weather-postgres-consumer",
 )
 
+CONSUMER_BATCH_SIZE = max(
+    1,
+    int(os.getenv("CONSUMER_BATCH_SIZE", "1000")),
+)
+
+CONSUMER_BATCH_TIMEOUT_SECONDS = max(
+    0.1,
+    float(os.getenv("CONSUMER_BATCH_TIMEOUT_SECONDS", "1.0")),
+)
+
 KAFKA_PARTITION = int(
     os.getenv(
         "KAFKA_PARTITION",

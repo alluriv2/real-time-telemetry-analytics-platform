@@ -2,7 +2,12 @@ import json
 from datetime import datetime
 
 import psycopg
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka import (
+    Consumer,
+    KafkaError,
+    KafkaException,
+    TopicPartition,
+)
 
 
 # ---------------------------------------------------------
@@ -14,6 +19,8 @@ from weather_platform.config import (
     KAFKA_BOOTSTRAP_SERVERS,
     KAFKA_TOPIC,
     KAFKA_CONSUMER_GROUP,
+    CONSUMER_BATCH_SIZE,
+    CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
 from weather_platform.ingestion_state import (
     create_ingestion_state_table,
@@ -364,33 +371,60 @@ WHERE EXCLUDED.dt >= weather_latest.dt;
 """
 
 
-def write_weather_record(
+def write_weather_batch(
     conn,
-    record,
-    partition,
-    offset,
+    batch,
 ):
     """
-    Write the raw observation and latest-state row in one PostgreSQL
-    transaction.
+    Write raw observations, latest-state rows, and ingestion watermarks
+    in one PostgreSQL transaction.
     """
+    if not batch:
+        return
+
+    records = [item["record"] for item in batch]
+
     try:
         with conn.cursor() as cur:
-            cur.execute(WEATHER_UPSERT_SQL, record)
-            cur.execute(LATEST_UPSERT_SQL, record)
-            record_consumer_watermark(
-                cur=cur,
-                station=record["station"],
-                timestamp=record["dt"],
-                partition=partition,
-                offset=offset,
-            )
+            cur.executemany(WEATHER_UPSERT_SQL, records)
+            cur.executemany(LATEST_UPSERT_SQL, records)
+
+            for item in batch:
+                record = item["record"]
+                record_consumer_watermark(
+                    cur=cur,
+                    station=record["station"],
+                    timestamp=record["dt"],
+                    partition=item["partition"],
+                    offset=item["offset"],
+                )
 
         conn.commit()
 
     except Exception:
         conn.rollback()
         raise
+
+
+def kafka_offsets_after(messages):
+    """
+    Return the next offset to commit for each partition represented in
+    a successfully processed batch.
+    """
+    next_offsets = {}
+
+    for msg in messages:
+        key = (msg.topic(), msg.partition())
+        next_offset = msg.offset() + 1
+        next_offsets[key] = max(
+            next_offset,
+            next_offsets.get(key, next_offset),
+        )
+
+    return [
+        TopicPartition(topic, partition, offset)
+        for (topic, partition), offset in next_offsets.items()
+    ]
 
 
 # ---------------------------------------------------------
@@ -409,6 +443,10 @@ def main():
 
     print(f"Listening to Kafka topic: {KAFKA_TOPIC}")
     print(f"Consumer group: {KAFKA_CONSUMER_GROUP}")
+    print(
+        f"Batching up to {CONSUMER_BATCH_SIZE} messages "
+        f"for {CONSUMER_BATCH_TIMEOUT_SECONDS:g} seconds."
+    )
     print("Press Ctrl+C to stop.\n")
 
     try:
@@ -418,82 +456,104 @@ def main():
             create_ingestion_state_table(conn)
 
             while True:
-                msg = consumer.poll(1.0)
+                messages = consumer.consume(
+                    num_messages=CONSUMER_BATCH_SIZE,
+                    timeout=CONSUMER_BATCH_TIMEOUT_SECONDS,
+                )
 
-                if msg is None:
+                if not messages:
                     continue
 
-                if msg.error():
-                    if (
-                        msg.error().code()
-                        == KafkaError.UNKNOWN_TOPIC_OR_PART
-                    ):
-                        print(
-                            "Kafka topic is not ready yet; "
-                            "waiting for the producer to create it."
-                        )
-                        continue
-                    raise KafkaException(msg.error())
-
                 try:
-                    obj = json.loads(
-                        msg.value().decode("utf-8")
+                    batch = []
+                    processed_messages = []
+
+                    for msg in messages:
+                        if msg.error():
+                            if (
+                                msg.error().code()
+                                == KafkaError.UNKNOWN_TOPIC_OR_PART
+                            ):
+                                print(
+                                    "Kafka topic is not ready yet; "
+                                    "waiting for the producer to "
+                                    "create it."
+                                )
+                                continue
+                            raise KafkaException(msg.error())
+
+                        processed_messages.append(msg)
+
+                        try:
+                            obj = json.loads(
+                                msg.value().decode("utf-8")
+                            )
+                        except (
+                            json.JSONDecodeError,
+                            UnicodeDecodeError,
+                        ):
+                            print(
+                                "Skipping malformed message "
+                                f"at partition {msg.partition()} "
+                                f"offset {msg.offset()}"
+                            )
+                            continue
+
+                        record = extract_record(obj)
+
+                        if record is None:
+                            print(
+                                "Skipping malformed message "
+                                f"at partition {msg.partition()} "
+                                f"offset {msg.offset()}"
+                            )
+                            continue
+
+                        # Keep raw pressure in Pa in the weather table.
+                        # Store latest/dashboard pressure in hPa.
+                        if record["pres_avg_pa"] is not None:
+                            record["pressure_hpa"] = (
+                                record["pres_avg_pa"] / 100
+                            )
+                        else:
+                            record["pressure_hpa"] = None
+
+                        batch.append({
+                            "record": record,
+                            "partition": msg.partition(),
+                            "offset": msg.offset(),
+                        })
+
+                    # All database writes in the batch commit together.
+                    write_weather_batch(
+                        conn=conn,
+                        batch=batch,
                     )
 
-                    record = extract_record(obj)
-
-                    # Check before accessing any fields in record.
-                    if record is None:
-                        print(
-                            "Skipping malformed message "
-                            f"at offset {msg.offset()}"
-                        )
+                    # Commit each partition's next Kafka offset only after
+                    # PostgreSQL commits. A crash between the two commits
+                    # can replay the batch, so writes remain idempotent.
+                    offsets = kafka_offsets_after(processed_messages)
+                    if offsets:
                         consumer.commit(
-                            message=msg,
+                            offsets=offsets,
                             asynchronous=False,
                         )
-                        continue
 
-                    # Keep raw pressure in Pa in the weather table.
-                    # Store the latest/dashboard pressure in hPa.
-                    if record["pres_avg_pa"] is not None:
-                        record["pressure_hpa"] = (
-                            record["pres_avg_pa"] / 100
+                    if batch:
+                        print(
+                            f"Stored batch of {len(batch)} records "
+                            f"from {len(offsets)} partition(s)"
                         )
-                    else:
-                        record["pressure_hpa"] = None
-
-                    # Raw and latest writes are committed together.
-                    write_weather_record(
-                        conn=conn,
-                        record=record,
-                        partition=msg.partition(),
-                        offset=msg.offset(),
-                    )
-
-                    # Commit the Kafka offset only after PostgreSQL commits.
-                    # A crash between these commits can replay a message, so
-                    # the database writes remain idempotent upserts.
-                    consumer.commit(
-                        message=msg,
-                        asynchronous=False,
-                    )
-
-                    print(
-                        f"Stored {record['station']} "
-                        f"{record['dt']} "
-                        f"from partition {msg.partition()} "
-                        f"offset {msg.offset()}"
-                    )
 
                 except Exception as exc:
                     print(
-                        f"Error processing partition "
-                        f"{msg.partition()} offset "
-                        f"{msg.offset()}: {exc}"
+                        "Error processing Kafka batch: "
+                        f"{exc}"
                     )
                     print(
-                        "Database transaction was rolled back."
+                        "The batch stopped; any uncommitted Kafka "
+                        "offsets will be replayed safely."
                     )
                     break
 
