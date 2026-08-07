@@ -7,8 +7,10 @@ Apache Kafka, stores idempotent records in PostgreSQL, calculates aggregates,
 serves data through FastAPI, and presents current conditions and historical
 trends through a Dash web application.
 
-The public dashboard is served through Nginx. PostgreSQL, Kafka, Prometheus,
-Grafana, and Kafka UI remain private.
+The dashboard and selected monitoring interfaces are served through Nginx over
+HTTPS. Grafana uses its built-in login, while Prometheus and Kafka UI are
+protected by Nginx Basic Authentication. PostgreSQL, Kafka, and every direct
+container port remain private.
 
 ## Architecture
 
@@ -34,6 +36,9 @@ Historical weather source                         Live weather source
                                           |
                                           v
 Internet --> Lightsail firewall --> Nginx :80/:443 --> Dash :8050
+                                                   --> Grafana :23000
+                                                   --> Prometheus :29090
+                                                   --> Kafka UI :18080
 ```
 
 ### Components
@@ -48,10 +53,10 @@ Internet --> Lightsail firewall --> Nginx :80/:443 --> Dash :8050
 | Aggregator | Refreshes the historical aggregate windows used by analytics queries. |
 | FastAPI | Provides health, metrics, current-condition, and historical-data endpoints. |
 | Dash/Gunicorn | Renders the browser-based weather dashboard. |
-| Nginx | Accepts public HTTP/HTTPS traffic and reverse-proxies it to Dash. |
+| Nginx | Terminates HTTPS, routes subdomains to the correct local service, and protects Prometheus and Kafka UI with Basic Authentication. |
 | Prometheus and exporters | Collect application, PostgreSQL, Kafka, and container metrics. |
 | Grafana | Displays the provisioned platform monitoring dashboard. |
-| Kafka UI | Provides an optional private interface for Kafka topics and messages. |
+| Kafka UI | Provides an optional authenticated interface for Kafka topics, consumer groups, offsets, and messages. |
 
 ## Repository structure
 
@@ -323,7 +328,8 @@ On a 2 GB instance, wait for the initial backfill and consumer catch-up to
 finish before starting monitoring or Kafka UI.
 
 Prometheus, Grafana, and Kafka UI bind to the instance loopback address. Open
-SSH tunnels from the local computer:
+SSH tunnels from the local computer when the public Nginx routes have not been
+configured:
 
 ```bash
 ssh \
@@ -339,7 +345,8 @@ Then open:
 - Grafana: `http://127.0.0.1:23000`
 - Kafka UI: `http://127.0.0.1:18080`
 
-Do not expose these ports publicly.
+Do not expose these ports in the Lightsail firewall. The optional public URLs
+described below still reach them only through Nginx on ports `80` and `443`.
 
 ## Deploy to AWS Lightsail
 
@@ -696,6 +703,247 @@ The public application is then available at:
 https://weather.example.com
 ```
 
+### 10. Publish Grafana, Prometheus, and Kafka UI securely
+
+This step keeps the Docker ports bound to `127.0.0.1` and publishes the tools
+through Nginx using separate HTTPS subdomains:
+
+| Public URL | Local upstream | Authentication |
+| --- | --- | --- |
+| `https://grafana.alluriv.dev` | `http://127.0.0.1:23000` | Grafana login |
+| `https://prometheus.alluriv.dev` | `http://127.0.0.1:29090` | Nginx Basic Auth |
+| `https://kafkaui.alluriv.dev` | `http://127.0.0.1:18080` | Nginx Basic Auth |
+
+#### Start the optional services
+
+Set the feature flags in `.env`:
+
+```dotenv
+ENABLE_MONITORING=true
+ENABLE_TOOLS=true
+```
+
+Start the monitoring and administration profiles:
+
+```bash
+docker compose --profile monitoring --profile tools up -d \
+  postgres-exporter kafka-exporter cadvisor prometheus grafana kafka-ui
+```
+
+Confirm that the loopback endpoints respond:
+
+```bash
+curl http://127.0.0.1:29090/-/healthy
+curl -I http://127.0.0.1:23000
+curl -I http://127.0.0.1:18080
+```
+
+A Grafana `302` redirect to `/login` is expected. Prometheus does not support
+`HEAD` on its health endpoint, so use the `GET` request shown above instead of
+`curl -I`.
+
+#### Add DNS and CAA records in Vercel
+
+In **Vercel → Domains → alluriv.dev**, add three A records that all use the
+same Lightsail static IPv4 address:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| `A` | `grafana` | `LIGHTSAIL_STATIC_IP` |
+| `A` | `prometheus` | `LIGHTSAIL_STATIC_IP` |
+| `A` | `kafkaui` | `LIGHTSAIL_STATIC_IP` |
+
+Nginx uses the requested hostname to route traffic to the correct service, so
+one static IP can serve all four subdomains. If the root domain already has
+restrictive CAA records, also add a CAA record for each of these names. In
+Vercel, enter the complete record value exactly as follows:
+
+```text
+0 issue "letsencrypt.org"
+```
+
+Verify DNS before requesting certificates:
+
+```bash
+dig +short grafana.alluriv.dev
+dig +short prometheus.alluriv.dev
+dig +short kafkaui.alluriv.dev
+dig CAA grafana.alluriv.dev
+dig CAA prometheus.alluriv.dev
+dig CAA kafkaui.alluriv.dev
+```
+
+#### Create Nginx credentials
+
+Install the password-file utility and create one account for Prometheus and
+Kafka UI. Replace `admin` if a different username is preferred:
+
+```bash
+sudo apt install -y apache2-utils
+sudo htpasswd -c /etc/nginx/.monitoring-htpasswd admin
+sudo chown root:www-data /etc/nginx/.monitoring-htpasswd
+sudo chmod 640 /etc/nginx/.monitoring-htpasswd
+```
+
+The command prompts for the password and stores a hash, not the plaintext
+password. To add another user later, omit `-c`; using `-c` again replaces the
+existing password file.
+
+#### Configure the Grafana reverse proxy
+
+Create `/etc/nginx/sites-available/grafana`:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name grafana.alluriv.dev;
+
+    location / {
+        proxy_pass http://127.0.0.1:23000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 120s;
+        proxy_connect_timeout 10s;
+    }
+}
+```
+
+Grafana is not given Nginx Basic Auth because it already has its own account
+system. Its initial administrator credentials come from:
+
+```dotenv
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=replace-with-a-strong-password
+```
+
+These values initialize a new Grafana database only once. Changing `.env`
+does not replace the password in an existing `local-data/grafana` database.
+Reset an existing administrator password securely with:
+
+```bash
+read -s -p "New Grafana password: " NEW_GRAFANA_PASSWORD
+echo
+docker compose exec grafana \
+  grafana cli admin reset-admin-password "$NEW_GRAFANA_PASSWORD"
+unset NEW_GRAFANA_PASSWORD
+```
+
+#### Configure the Prometheus reverse proxy
+
+Create `/etc/nginx/sites-available/prometheus`:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name prometheus.alluriv.dev;
+
+    auth_basic "Prometheus monitoring";
+    auth_basic_user_file /etc/nginx/.monitoring-htpasswd;
+
+    location / {
+        proxy_pass http://127.0.0.1:29090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+        proxy_connect_timeout 10s;
+    }
+}
+```
+
+#### Configure the Kafka UI reverse proxy
+
+Create `/etc/nginx/sites-available/kafkaui`:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name kafkaui.alluriv.dev;
+
+    auth_basic "Kafka administration";
+    auth_basic_user_file /etc/nginx/.monitoring-htpasswd;
+
+    location / {
+        proxy_pass http://127.0.0.1:18080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 120s;
+        proxy_connect_timeout 10s;
+    }
+}
+```
+
+Enable all three sites, validate the full Nginx configuration, and reload it:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/grafana \
+  /etc/nginx/sites-enabled/grafana
+sudo ln -s /etc/nginx/sites-available/prometheus \
+  /etc/nginx/sites-enabled/prometheus
+sudo ln -s /etc/nginx/sites-available/kafkaui \
+  /etc/nginx/sites-enabled/kafkaui
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+If a link already exists, do not recreate it. Test local Nginx routing before
+requesting certificates:
+
+```bash
+curl -I -H "Host: grafana.alluriv.dev" http://127.0.0.1
+curl -I -H "Host: prometheus.alluriv.dev" http://127.0.0.1
+curl -I -H "Host: kafkaui.alluriv.dev" http://127.0.0.1
+curl -u admin -H "Host: prometheus.alluriv.dev" \
+  http://127.0.0.1/-/healthy
+```
+
+The unauthenticated Prometheus and Kafka UI requests should return `401`.
+Grafana should return `302` with `Location: /login`.
+
+#### Enable HTTPS and verify authentication
+
+Request one certificate containing all three subdomains and let Certbot update
+the corresponding Nginx sites:
+
+```bash
+sudo certbot --nginx \
+  -d grafana.alluriv.dev \
+  -d prometheus.alluriv.dev \
+  -d kafkaui.alluriv.dev
+sudo certbot renew --dry-run
+```
+
+Verify the public routes:
+
+```bash
+curl -I https://grafana.alluriv.dev
+curl -I https://prometheus.alluriv.dev
+curl -I https://kafkaui.alluriv.dev
+curl -u admin https://prometheus.alluriv.dev/-/healthy
+curl -u admin -o /dev/null -s -w '%{http_code}\n' \
+  https://kafkaui.alluriv.dev
+```
+
+Expected results are a Grafana redirect to `/login`, `401 Unauthorized` from
+Prometheus and Kafka UI without credentials, a healthy Prometheus response
+with credentials, and HTTP `200` from authenticated Kafka UI. Keep ports
+`18080`, `23000`, and `29090` closed in the Lightsail firewall.
+
 ## Deploy application updates
 
 Commit and push tested changes from the development computer. On Lightsail:
@@ -835,7 +1083,9 @@ catches up.
 - Bind Dash to `127.0.0.1` when Nginx is the public entry point.
 - Expose only ports `80` and `443` publicly.
 - Restrict SSH to trusted source addresses where practical.
-- Never expose PostgreSQL, Kafka, Prometheus, Grafana, or Kafka UI publicly.
+- Never expose PostgreSQL, Kafka, or the direct monitoring container ports.
+- Publish monitoring tools only through HTTPS: Grafana with its own login and
+  Prometheus/Kafka UI with Nginx Basic Authentication.
 - Apply Ubuntu, Docker, and container-image security updates.
 - Use HTTPS before sharing the dashboard publicly.
 - Store backups and snapshots outside the running application instance.
