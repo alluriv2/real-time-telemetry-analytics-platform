@@ -140,6 +140,21 @@ CONSUMER_BATCH_TIMEOUT_SECONDS = max(
     float(os.getenv("CONSUMER_BATCH_TIMEOUT_SECONDS", "1.0")),
 )
 
+# Exit (so Docker restarts the container) if the consumer holds no
+# partition assignment for this long. Catches a consumer that has dropped
+# out of its group but is still running.
+CONSUMER_STALL_TIMEOUT_SECONDS = max(
+    30.0,
+    float(os.getenv("CONSUMER_STALL_TIMEOUT_SECONDS", "300")),
+)
+
+# /health/data reports unhealthy when the newest write to weather_latest
+# is older than this.
+DATA_STALE_SECONDS = max(
+    60,
+    int(os.getenv("DATA_STALE_SECONDS", "1800")),
+)
+
 KAFKA_PARTITION = int(
     os.getenv(
         "KAFKA_PARTITION",

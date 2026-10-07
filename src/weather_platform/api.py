@@ -11,7 +11,7 @@ from prometheus_client import (
     generate_latest,
 )
 
-from weather_platform.config import POSTGRES_CONFIG
+from weather_platform.config import DATA_STALE_SECONDS, POSTGRES_CONFIG
 
 
 app = FastAPI(
@@ -199,6 +199,7 @@ def landing_page():
             "/history",
             "/ingestion-status",
             "/health",
+            "/health/data",
             "/metrics",
             "/docs",
         ],
@@ -234,6 +235,59 @@ def health():
             status_code=503,
             detail=f"Database unavailable: {exc}",
         )
+
+
+@app.get("/health/data")
+def health_data():
+    """
+    Report whether new observations are still being stored.
+
+    /health only proves the API can reach PostgreSQL. This also fails
+    when the pipeline has stopped writing, such as a stalled consumer,
+    so an external monitor can catch frozen data behind a page that
+    still loads.
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXTRACT(EPOCH FROM (
+                        LOCALTIMESTAMP - MAX(updated_at)
+                    )) AS age_seconds
+                    FROM weather_latest;
+                    """
+                )
+                row = cur.fetchone()
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database unavailable: {exc}",
+        )
+
+    age = row["age_seconds"] if row else None
+
+    if age is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No observations have been stored yet.",
+        )
+
+    age_seconds = round(float(age))
+
+    if age_seconds > DATA_STALE_SECONDS:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Newest stored observation is {age_seconds} seconds "
+                f"old (limit {DATA_STALE_SECONDS})."
+            ),
+        )
+
+    return {
+        "status": "fresh",
+        "newest_observation_age_seconds": age_seconds,
+    }
 
 
 @app.get("/ingestion-status")
