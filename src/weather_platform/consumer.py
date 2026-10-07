@@ -1,4 +1,7 @@
 import json
+import os
+import sys
+import time
 from datetime import datetime
 
 import psycopg
@@ -21,6 +24,7 @@ from weather_platform.config import (
     KAFKA_CONSUMER_GROUP,
     CONSUMER_BATCH_SIZE,
     CONSUMER_BATCH_TIMEOUT_SECONDS,
+    CONSUMER_STALL_TIMEOUT_SECONDS,
 )
 from weather_platform.ingestion_state import (
     create_ingestion_state_table,
@@ -427,6 +431,27 @@ def kafka_offsets_after(messages):
     ]
 
 
+class StallWatchdog:
+    """
+    Detect a consumer that is running but no longer part of its group.
+
+    librdkafka can lose the group coordinator and keep returning empty
+    polls forever while the process stays up. In that state the consumer
+    holds no partition assignment, so a long period without one means
+    it is stuck.
+    """
+
+    def __init__(self, timeout_seconds, now):
+        self.timeout_seconds = timeout_seconds
+        self.last_assigned_at = now
+
+    def is_stalled(self, has_assignment, now):
+        if has_assignment:
+            self.last_assigned_at = now
+            return False
+        return now - self.last_assigned_at > self.timeout_seconds
+
+
 # ---------------------------------------------------------
 # Main consumer
 # ---------------------------------------------------------
@@ -455,11 +480,31 @@ def main():
             create_latest_table(conn)
             create_ingestion_state_table(conn)
 
+            watchdog = StallWatchdog(
+                CONSUMER_STALL_TIMEOUT_SECONDS,
+                time.monotonic(),
+            )
+
             while True:
                 messages = consumer.consume(
                     num_messages=CONSUMER_BATCH_SIZE,
                     timeout=CONSUMER_BATCH_TIMEOUT_SECONDS,
                 )
+
+                if watchdog.is_stalled(
+                    bool(consumer.assignment()),
+                    time.monotonic(),
+                ):
+                    print(
+                        "Consumer has held no partition assignment for "
+                        f"over {CONSUMER_STALL_TIMEOUT_SECONDS:g} seconds; "
+                        "exiting so Docker restarts it. Uncommitted "
+                        "Kafka offsets will be replayed safely."
+                    )
+                    sys.stdout.flush()
+                    # Skip consumer.close(): it can block on the same
+                    # unresponsive coordinator that caused the stall.
+                    os._exit(1)
 
                 if not messages:
                     continue
