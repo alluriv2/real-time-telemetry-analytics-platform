@@ -1,4 +1,40 @@
-# Weather Analytics Platform — AWS
+# Real-Time Telemetry Analytics Platform
+
+[![CI](https://github.com/alluriv2/real-time-telemetry-analytics-platform/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alluriv2/real-time-telemetry-analytics-platform/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-event_streaming-orange)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-storage-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-REST-009688)
+![Plotly Dash](https://img.shields.io/badge/Plotly-Dash-purple)
+![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED)
+![AWS Lightsail](https://img.shields.io/badge/AWS-Lightsail-FF9900)
+![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub_Actions-2088FF)
+
+> An end-to-end, event-driven platform for weather-station telemetry: Kafka ingestion, idempotent PostgreSQL storage, time-window aggregates, a REST API and a live dashboard, deployed to AWS Lightsail with automated CI/CD and monitoring.
+
+![Dashboard showing current temperature, wind, rainfall, humidity, pressure and light readings for a selected station](images/current_conditions.png)
+
+## At a glance
+
+| | |
+|---|---|
+| **What it does** | Collects historical and live weather-station telemetry, stores it in PostgreSQL, builds day, week, month and year aggregates, and serves current conditions and historical trends through FastAPI and a Plotly Dash dashboard |
+| **Architecture** | Nine core services on one AWS Lightsail instance with Docker Compose: backfill, producer, Kafka, consumer, PostgreSQL, aggregator, API, dashboard and Nginx. Prometheus, Grafana and Kafka UI are optional |
+| **Data flow** | Backfill and live producer → Kafka → consumer → PostgreSQL → aggregator and API → dashboard. Historical and live data take the same path, so they share one set of validation and storage rules |
+| **Delivery guarantees** | At-least-once delivery with idempotent writes. The consumer reads a batch, commits one PostgreSQL transaction, then commits the Kafka offsets, so a failed batch replays and a duplicate batch changes nothing. Batches are 1,000 records |
+| **Recovery** | On startup the platform compares source, producer, consumer and database timestamps and republishes only the window that is missing. Ingestion progress is stored in PostgreSQL |
+| **Data freshness** | A consumer watchdog restarts a consumer that loses its Kafka group, and `/health/data` returns 503 when the newest write is stale, so an external uptime monitor can catch a silent data stall |
+| **CI/CD** | GitHub Actions runs a syntax check, unit tests, Compose validation and an image build on every push and pull request. When CI passes on `main`, a second workflow deploys to Lightsail over SSH with a fast-forward-only pull |
+| **Security** | Secrets stay out of Git (server-managed `.env`, GitHub Secrets). The server uses a read-only deploy key and a pinned SSH host key. Only HTTP, HTTPS and SSH are open. PostgreSQL and Kafka are private. HTTPS comes from Let's Encrypt, and Prometheus and Kafka UI sit behind authentication |
+| **Stack** | Python 3.12 · Apache Kafka · PostgreSQL · FastAPI · Plotly Dash · Gunicorn · Nginx · Docker Compose · AWS Lightsail · GitHub Actions · Prometheus · Grafana |
+
+## Screenshots
+
+| Historical trends | Kafka UI |
+|---|---|
+| ![Humidity trends for all stations over one year with 24-hour, 1-week, 1-month and 1-year windows](images/trends.png) | ![Kafka UI listing telemetry events keyed by station and timestamp](images/kafka_ui.png) |
+
+## Overview
 
 A containerized, event-driven weather analytics platform designed to run on a
 single AWS Lightsail Linux instance with Docker Compose. The platform collects
@@ -452,9 +488,13 @@ ssh -T git@github.com
 Clone:
 
 ```bash
-git clone git@github.com:OWNER/weather-analytics-platform-aws.git
+git clone git@github.com:OWNER/real-time-telemetry-analytics-platform.git weather-analytics-platform-aws
 cd weather-analytics-platform-aws
 ```
+
+The clone command names the target folder `weather-analytics-platform-aws` on purpose:
+the deployment workflow and the commands below use `~/weather-analytics-platform-aws`
+as the server path.
 
 Never copy or expose `~/.ssh/id_ed25519`; only the `.pub` file belongs in
 GitHub.
@@ -1098,10 +1138,10 @@ deployment:
 - `.github/workflows/ci.yml` runs the **Continuous Integration** workflow.
 - `.github/workflows/deploy.yml` runs the **Continuous Deployment** workflow.
 
-The workflows are configured, but a successful end-to-end production
-deployment should not be assumed until a change has passed CI on `main`, the CD
-run has completed successfully, and the application has been checked on the
-Lightsail instance.
+Both workflows have run end to end: merges to `main` pass CI, and each
+successful CI run triggers a CD run that deploys to the Lightsail instance. After
+a deployment, check the application on the instance (see
+[Operations](#operations)).
 
 ### Development workflow
 
@@ -1142,10 +1182,11 @@ steps on an Ubuntu runner:
 3. Installs dependencies from `requirements.txt`.
 4. Compiles the Python source with `python -m compileall .` to catch syntax
    errors.
-5. Copies `.env.example` to `.env` for CI-only configuration.
-6. Validates the resolved Compose configuration with
+5. Runs the unit tests with `python -m unittest discover -s tests -v`.
+6. Copies `.env.example` to `.env` for CI-only configuration.
+7. Validates the resolved Compose configuration with
    `docker compose config --quiet`.
-7. Builds the Docker Compose application image.
+8. Builds the Docker Compose application image.
 
 The generated CI `.env` exists only on the temporary GitHub-hosted runner.
 CI uses the committed example values solely to validate configuration and
