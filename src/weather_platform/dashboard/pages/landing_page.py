@@ -7,7 +7,7 @@ from dash import Input, Output, callback, dcc, html, register_page
 register_page(
     __name__,
     path="/",
-    title="Current Weather",
+    title="Telemetry Dashboard",
 )
 
 

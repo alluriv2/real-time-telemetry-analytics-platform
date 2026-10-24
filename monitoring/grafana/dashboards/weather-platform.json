@@ -86,7 +86,7 @@
   "templating": {"list": []},
   "time": {"from": "now-1h", "to": "now"},
   "timezone": "browser",
-  "title": "Weather Analytics Platform",
+  "title": "Telemetry Analytics Platform",
   "uid": "weather-analytics-aws",
   "version": 1
 }
