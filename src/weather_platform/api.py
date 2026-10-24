@@ -15,7 +15,7 @@ from weather_platform.config import DATA_STALE_SECONDS, POSTGRES_CONFIG
 
 
 app = FastAPI(
-    title="Real-Time Weather Analytics API",
+    title="Real-Time Telemetry Analytics API",
     version="1.0",
 )
 
@@ -192,7 +192,7 @@ def refresh_ingestion_metrics():
 @app.get("/")
 def landing_page():
     return {
-        "message": "Real-Time Weather Analytics API",
+        "message": "Real-Time Telemetry Analytics API",
         "version": "1.0",
         "available_endpoints": [
             "/latest",

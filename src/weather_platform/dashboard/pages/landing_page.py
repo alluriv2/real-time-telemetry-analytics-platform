@@ -118,7 +118,7 @@ layout = html.Div(
         # -------------------------------------------------
 
         html.H1(
-            "Real-Time Weather Analytics Platform",
+            "Real-Time Telemetry Analytics Platform",
             style={
                 "textAlign": "center",
                 "fontSize": "44px",
