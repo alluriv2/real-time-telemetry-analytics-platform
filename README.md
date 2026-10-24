@@ -1,6 +1,6 @@
-# Real-Time Telemetry Analytics Platform
+# Real-Time Weather Analytics Platform
 
-[![CI](https://github.com/alluriv2/real-time-telemetry-analytics-platform/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alluriv2/real-time-telemetry-analytics-platform/actions/workflows/ci.yml)
+[![CI](https://github.com/alluriv2/real-time-weather-analytics-platform/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alluriv2/real-time-weather-analytics-platform/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-event_streaming-orange)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-storage-blue)
@@ -34,11 +34,11 @@
 
 | Historical trends | Kafka UI |
 |---|---|
-| ![Humidity trends for all stations over one year with 24-hour, 1-week, 1-month and 1-year windows](images/trends.png) | ![Kafka UI listing telemetry events keyed by station and timestamp](images/kafka_ui.png) |
+| ![Humidity trends for all stations over one year with 24-hour, 1-week, 1-month and 1-year windows](images/trends.png) | ![Kafka UI listing weather observation events keyed by station and timestamp](images/kafka_ui.png) |
 
 ## Overview
 
-A containerized, event-driven telemetry analytics platform designed to run on a
+A containerized, event-driven weather analytics platform designed to run on a
 single AWS Lightsail Linux instance with Docker Compose. The platform collects
 historical and live weather observations, routes every observation through
 Apache Kafka, stores idempotent records in PostgreSQL, calculates aggregates,
@@ -490,7 +490,7 @@ ssh -T git@github.com
 Clone:
 
 ```bash
-git clone git@github.com:OWNER/real-time-telemetry-analytics-platform.git weather-analytics-platform-aws
+git clone git@github.com:OWNER/real-time-weather-analytics-platform.git weather-analytics-platform-aws
 cd weather-analytics-platform-aws
 ```
 

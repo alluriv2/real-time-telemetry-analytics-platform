@@ -41,7 +41,7 @@ def data_health():
     return Response(body, status=status, mimetype="application/json")
 
 
-app.title = "Real-Time Telemetry Analytics Platform"
+app.title = "Real-Time Weather Analytics Platform"
 
 app.layout = html.Div(
     [

@@ -7,7 +7,7 @@ from dash import Input, Output, callback, dcc, html, register_page
 register_page(
     __name__,
     path="/",
-    title="Telemetry Dashboard",
+    title="Current Weather",
 )
 
 
@@ -118,7 +118,7 @@ layout = html.Div(
         # -------------------------------------------------
 
         html.H1(
-            "Real-Time Telemetry Analytics Platform",
+            "Real-Time Weather Analytics Platform",
             style={
                 "textAlign": "center",
                 "fontSize": "44px",
