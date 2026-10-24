@@ -12,6 +12,8 @@
 
 > An end-to-end, event-driven platform for weather-station telemetry: Kafka ingestion, idempotent PostgreSQL storage, time-window aggregates, a REST API and a live dashboard, deployed to AWS Lightsail with automated CI/CD and monitoring.
 
+**Live dashboard:** [weather.alluriv.dev](https://weather.alluriv.dev)
+
 ![Dashboard showing current temperature, wind, rainfall, humidity, pressure and light readings for a selected station](images/current_conditions.png)
 
 ## At a glance
@@ -1391,3 +1393,7 @@ pending verification rather than verified.
 - Introduce image scanning, dependency update automation, and secret scanning.
 - Add a rollback procedure or immutable image registry deployment once the
   single-instance workflow grows beyond direct source deployment.
+
+## License
+
+Released under the [MIT License](LICENSE).
