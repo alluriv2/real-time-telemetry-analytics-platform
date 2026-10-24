@@ -38,7 +38,7 @@
 
 ## Overview
 
-A containerized, event-driven weather analytics platform designed to run on a
+A containerized, event-driven telemetry analytics platform designed to run on a
 single AWS Lightsail Linux instance with Docker Compose. The platform collects
 historical and live weather observations, routes every observation through
 Apache Kafka, stores idempotent records in PostgreSQL, calculates aggregates,
